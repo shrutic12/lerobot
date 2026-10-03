@@ -26,7 +26,7 @@ from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.processor import make_default_processors
 from lerobot.robots import make_robot_from_config
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
-from lerobot.scripts.lerobot_record import RecordConfig, record, record_loop
+from lerobot.scripts.lerobot_record import RecordConfig, record, record_loop, resolve_episode_tasks
 from lerobot.scripts.lerobot_replay import DatasetReplayConfig, ReplayConfig, replay
 from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleoperate
 from tests.fixtures.constants import DUMMY_REPO_ID
@@ -253,3 +253,47 @@ def test_record_loop_without_a_teleoperator_paces_and_terminates():
 
     # 0.1 s at 30 Hz is 3 ticks; the upper bound is what proves the phase was paced.
     assert 1 <= calls <= 6
+
+
+def test_record_with_task_list_uses_one_task_per_episode(tmp_path):
+    task_list = tmp_path / "tasks.txt"
+    task_list.write_text(
+        "# chain 1\npick up the yellow cube\n\npick up the orange cube\npick up the green cube\n"
+    )
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        task_list=task_list,
+        task_list_start=1,
+        root=tmp_path / "record",
+        num_episodes=10,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+    cfg = RecordConfig(
+        robot=MockRobotConfig(), dataset=dataset_cfg, teleop=MockTeleopConfig(), play_sounds=False
+    )
+
+    dataset = record(cfg)
+
+    # Starts at the second task and stops at the end of the list, before num_episodes.
+    assert dataset.meta.total_episodes == 2
+    assert dataset.meta.total_tasks == 2
+    # Each episode is 3 frames long.
+    assert dataset[0]["task"] == "pick up the orange cube"
+    assert dataset[3]["task"] == "pick up the green cube"
+
+
+def test_resolve_episode_tasks(tmp_path):
+    task_list = tmp_path / "tasks.txt"
+    task_list.write_text("a\nb\nc\n")
+
+    assert resolve_episode_tasks(DatasetRecordConfig(single_task="t", num_episodes=2)) == ["t", "t"]
+    assert resolve_episode_tasks(DatasetRecordConfig(task_list=task_list, num_episodes=2)) == ["a", "b"]
+    with pytest.raises(ValueError, match="not both"):
+        resolve_episode_tasks(DatasetRecordConfig(single_task="t", task_list=task_list))
+    with pytest.raises(ValueError, match="out of range"):
+        resolve_episode_tasks(DatasetRecordConfig(task_list=task_list, task_list_start=3))
+    task_list.write_text("# only a comment\n\n")
+    with pytest.raises(ValueError, match="no tasks"):
+        resolve_episode_tasks(DatasetRecordConfig(task_list=task_list))

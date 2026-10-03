@@ -87,11 +87,27 @@ lerobot-record \\
     --dataset.rgb_encoder.extra_options={"tune": "film", "profile:v": "high", "bf": 2} \\
     --display_data=true
 ```
+
+Example recording a different task per episode, read in order from a text file (one task per line).
+The next task is announced during each reset. Add ``--resume=true --dataset.task_list_start=<index>``
+to continue a list in an existing dataset:
+```shell
+lerobot-record \\
+    --robot.type=so100_follower \\
+    --robot.port=/dev/tty.usbmodem58760431541 \\
+    --robot.cameras="{laptop: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \\
+    --teleop.type=so100_leader \\
+    --teleop.port=/dev/tty.usbmodem58760431551 \\
+    --dataset.repo_id=<my_username>/<my_dataset_name> \\
+    --dataset.task_list=tasks.txt \\
+    --dataset.num_episodes=72
+```
 """
 
 import logging
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from pprint import pformat
 
 from lerobot.cameras import CameraConfig  # noqa: F401
@@ -222,6 +238,37 @@ class RecordConfig:
                                V
                   ( Rerun Log / Loop Wait )
 """
+
+
+def resolve_episode_tasks(dataset_cfg: DatasetRecordConfig) -> list[str]:
+    """Return the task of each episode to record, in order.
+
+    Without ``task_list`` every episode gets ``single_task``. With it, tasks are read one per line
+    (blank lines and ``#`` comments skipped), starting at ``task_list_start`` and capped at
+    ``num_episodes``.
+    """
+    if dataset_cfg.task_list is None:
+        return [dataset_cfg.single_task] * dataset_cfg.num_episodes
+
+    if dataset_cfg.single_task:
+        raise ValueError("Set either --dataset.single_task or --dataset.task_list, not both.")
+    lines = (line.strip() for line in Path(dataset_cfg.task_list).read_text().splitlines())
+    tasks = [line for line in lines if line and not line.startswith("#")]
+    if not tasks:
+        raise ValueError(f"Task list '{dataset_cfg.task_list}' contains no tasks.")
+    start = dataset_cfg.task_list_start
+    if not 0 <= start < len(tasks):
+        raise ValueError(
+            f"--dataset.task_list_start={start} is out of range for '{dataset_cfg.task_list}' "
+            f"({len(tasks)} tasks)."
+        )
+    tasks = tasks[start:]
+    if dataset_cfg.num_episodes < len(tasks):
+        logging.warning(
+            f"Recording only {dataset_cfg.num_episodes} of the {len(tasks)} remaining tasks in the list. "
+            f"Pass --dataset.num_episodes={len(tasks)} to record them all."
+        )
+    return tasks[: dataset_cfg.num_episodes]
 
 
 @safe_stop_image_writer
@@ -391,6 +438,9 @@ def record(
 ) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    # Resolved before touching hardware so a bad task list fails fast.
+    episode_tasks = resolve_episode_tasks(cfg.dataset)
+    announce_tasks = cfg.dataset.task_list is not None
     if cfg.display_data:
         init_visualization(
             cfg.display_mode, session_name="recording", ip=cfg.display_ip, port=cfg.display_port
@@ -498,9 +548,13 @@ def record(
 
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
-            while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+            while recorded_episodes < len(episode_tasks) and not events["stop_recording"]:
                 episode_index = dataset.num_episodes
-                log_say(f"Recording episode {episode_index}", cfg.play_sounds)
+                task = episode_tasks[recorded_episodes]
+                if announce_tasks:
+                    log_say(f"Recording episode {episode_index}: {task}", cfg.play_sounds)
+                else:
+                    log_say(f"Recording episode {episode_index}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
                     events=events,
@@ -511,7 +565,7 @@ def record(
                     teleop=teleop,
                     dataset=dataset,
                     control_time_s=cfg.dataset.episode_time_s,
-                    single_task=cfg.dataset.single_task,
+                    single_task=task,
                     display_data=cfg.display_data,
                     display_mode=cfg.display_mode,
                     display_compressed_images=display_compressed_images,
@@ -521,9 +575,14 @@ def record(
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
                 if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                    (recorded_episodes < len(episode_tasks) - 1) or events["rerecord_episode"]
                 ):
                     log_say("Reset the environment", cfg.play_sounds)
+                    if announce_tasks:
+                        next_task = episode_tasks[
+                            recorded_episodes + (0 if events["rerecord_episode"] else 1)
+                        ]
+                        log_say(f"Next: {next_task}", cfg.play_sounds)
 
                     record_loop(
                         robot=robot,
@@ -534,7 +593,7 @@ def record(
                         robot_observation_processor=robot_observation_processor,
                         teleop=teleop,
                         control_time_s=cfg.dataset.reset_time_s,
-                        single_task=cfg.dataset.single_task,
+                        single_task=task,
                         display_data=cfg.display_data,
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,

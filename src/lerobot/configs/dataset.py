@@ -27,6 +27,12 @@ class DatasetRecordConfig:
     repo_id: str = ""
     # A short but accurate description of the task performed during the recording (e.g. "Pick the Lego block and drop it in the box on the right.")
     single_task: str = ""
+    # lerobot-record only: path to a text file with one task per line, used in order, one per episode
+    # (blank lines and lines starting with '#' are skipped). Replaces `single_task`. Recording stops at the
+    # end of the list or after `num_episodes` episodes, whichever comes first.
+    task_list: str | Path | None = None
+    # Index (0-based) of the first task in `task_list` to record, e.g. to continue a list with `--resume=true`.
+    task_list_start: int = 0
     # Root directory where the dataset will be stored (e.g. 'dataset/path'). If None, defaults to $HF_LEROBOT_HOME/repo_id.
     root: str | Path | None = None
     # Limit the frames per second.
